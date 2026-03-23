@@ -1,0 +1,270 @@
+"""TrustStateClient — async HTTP client for the TrustState compliance API.
+
+Usage::
+
+    from truststate import TrustStateClient
+
+    client = TrustStateClient(api_key="your-key")
+    result = await client.check("AgentResponse", {"text": "...", "score": 0.9})
+"""
+
+from __future__ import annotations
+
+import random
+import uuid
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+from .exceptions import TrustStateError
+from .types import BatchResult, ComplianceResult
+
+
+class TrustStateClient:
+    """Async client for the TrustState compliance validation API.
+
+    Args:
+        api_key: Your TrustState API key (used as X-API-Key header for writes).
+        base_url: Override the default API base URL.
+        default_schema_version: Schema version applied when not specified per-call.
+        default_actor_id: Actor ID applied when not specified per-call.
+        mock: If True, all HTTP calls are skipped and synthetic results are returned.
+        mock_pass_rate: Probability (0.0–1.0) that a mock check returns passed=True.
+            1.0 = always pass, 0.0 = always fail, 0.8 = 80% pass rate.
+        timeout: HTTP request timeout in seconds.
+    """
+
+    DEFAULT_BASE_URL = "https://truststate-api.apps.trustchainlabs.com"
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = DEFAULT_BASE_URL,
+        default_schema_version: str = "1.0",
+        default_actor_id: str = "",
+        mock: bool = False,
+        mock_pass_rate: float = 1.0,
+        timeout: int = 30,
+    ) -> None:
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._default_schema_version = default_schema_version
+        self._default_actor_id = default_actor_id
+        self._mock = mock
+        self._mock_pass_rate = float(mock_pass_rate)
+        self._timeout = timeout
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def check(
+        self,
+        entity_type: str,
+        data: Dict[str, Any],
+        action: str = "CREATE",
+        entity_id: Optional[str] = None,
+        schema_version: Optional[str] = None,
+        actor_id: Optional[str] = None,
+    ) -> ComplianceResult:
+        """Submit a single record for compliance checking.
+
+        Internally wraps the record in a one-item batch and calls POST /v1/write/batch.
+
+        Args:
+            entity_type: The type/category of the entity (e.g. "AgentResponse").
+            data: The record payload to validate.
+            action: The action being performed — "CREATE", "UPDATE", or "DELETE".
+            entity_id: Optional stable identifier for this entity. Auto-generated (uuid4)
+                if not provided.
+            schema_version: Override the client's default schema version.
+            actor_id: Override the client's default actor ID.
+
+        Returns:
+            ComplianceResult with pass/fail status and, if passed, a record_id.
+
+        Raises:
+            TrustStateError: On HTTP 4xx/5xx responses.
+        """
+        eid = entity_id or str(uuid.uuid4())
+
+        if self._mock:
+            return self._mock_single_result(eid)
+
+        batch_result = await self.check_batch(
+            items=[
+                {
+                    "entity_type": entity_type,
+                    "data": data,
+                    "action": action,
+                    "entity_id": eid,
+                    "schema_version": schema_version,
+                    "actor_id": actor_id,
+                }
+            ],
+            default_schema_version=schema_version,
+            default_actor_id=actor_id,
+        )
+        return batch_result.results[0]
+
+    async def check_batch(
+        self,
+        items: List[Dict[str, Any]],
+        default_schema_version: Optional[str] = None,
+        default_actor_id: Optional[str] = None,
+    ) -> BatchResult:
+        """Submit multiple records for compliance checking in a single API call.
+
+        Args:
+            items: List of item dicts. Each may contain:
+                - entity_type (required)
+                - data (required)
+                - action (optional, default "CREATE")
+                - entity_id (optional, auto-generated if absent)
+                - schema_version (optional)
+                - actor_id (optional)
+            default_schema_version: Fallback schema version for items that don't specify one.
+            default_actor_id: Fallback actor ID for items that don't specify one.
+
+        Returns:
+            BatchResult summarising acceptance/rejection counts and per-item results.
+
+        Raises:
+            TrustStateError: On HTTP 4xx/5xx responses.
+        """
+        schema_ver = default_schema_version or self._default_schema_version
+        actor = default_actor_id or self._default_actor_id
+
+        # Normalise items and assign missing entity IDs
+        normalised = []
+        for item in items:
+            eid = item.get("entity_id") or str(uuid.uuid4())
+            normalised.append(
+                {
+                    "entityType": item["entity_type"],
+                    "data": item["data"],
+                    "action": item.get("action", "CREATE"),
+                    "entityId": eid,
+                    "schemaVersion": item.get("schema_version") or schema_ver,
+                    "actorId": item.get("actor_id") or actor,
+                }
+            )
+
+        if self._mock:
+            return self._mock_batch_result(normalised)
+
+        payload = {"records": normalised}
+        response_json = await self._post("/v1/write/batch", payload)
+        return self._parse_batch_response(response_json)
+
+    async def verify(self, record_id: str, bearer_token: str) -> Dict[str, Any]:
+        """Retrieve an immutable compliance record from the ledger.
+
+        Args:
+            record_id: The record ID returned by a previous check() that passed.
+            bearer_token: A valid Bearer token for the TrustState API.
+
+        Returns:
+            The full record dict from the API.
+
+        Raises:
+            TrustStateError: On HTTP 4xx/5xx responses.
+        """
+        url = f"{self._base_url}/v1/records/{record_id}"
+        headers = {"Authorization": f"Bearer {bearer_token}"}
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            try:
+                resp = await client.get(url, headers=headers)
+            except httpx.RequestError as exc:
+                raise TrustStateError(f"Network error: {exc}") from exc
+
+        if resp.status_code >= 400:
+            raise TrustStateError(
+                f"API error {resp.status_code}: {resp.text}", resp.status_code
+            )
+
+        return resp.json()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Make an authenticated POST request and return the JSON response body."""
+        url = f"{self._base_url}{path}"
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": self._api_key,
+        }
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+            except httpx.RequestError as exc:
+                raise TrustStateError(f"Network error: {exc}") from exc
+
+        if resp.status_code >= 400:
+            raise TrustStateError(
+                f"API error {resp.status_code}: {resp.text}", resp.status_code
+            )
+
+        return resp.json()
+
+    def _parse_batch_response(self, data: Dict[str, Any]) -> BatchResult:
+        """Convert raw API JSON into a BatchResult."""
+        raw_results = data.get("results", [])
+        results = []
+        for r in raw_results:
+            results.append(
+                ComplianceResult(
+                    passed=r.get("passed", False),
+                    record_id=r.get("recordId"),
+                    request_id=r.get("requestId", ""),
+                    entity_id=r.get("entityId", ""),
+                    fail_reason=r.get("failReason"),
+                    failed_step=r.get("failedStep"),
+                    mock=False,
+                )
+            )
+
+        return BatchResult(
+            batch_id=data.get("batchId", str(uuid.uuid4())),
+            total=data.get("total", len(results)),
+            accepted=data.get("accepted", sum(1 for r in results if r.passed)),
+            rejected=data.get("rejected", sum(1 for r in results if not r.passed)),
+            results=results,
+            mock=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Mock helpers (no network calls)
+    # ------------------------------------------------------------------
+
+    def _mock_single_result(self, entity_id: str) -> ComplianceResult:
+        """Generate a synthetic ComplianceResult for mock mode."""
+        passed = random.random() < self._mock_pass_rate
+        return ComplianceResult(
+            passed=passed,
+            record_id=f"mock-rec-{uuid.uuid4()}" if passed else None,
+            request_id=f"mock-req-{uuid.uuid4()}",
+            entity_id=entity_id,
+            fail_reason=None if passed else "Mock: simulated policy failure",
+            failed_step=None if passed else 9,
+            mock=True,
+        )
+
+    def _mock_batch_result(self, normalised_items: List[Dict[str, Any]]) -> BatchResult:
+        """Generate a synthetic BatchResult for mock mode."""
+        results = [
+            self._mock_single_result(item["entityId"]) for item in normalised_items
+        ]
+        accepted = sum(1 for r in results if r.passed)
+        return BatchResult(
+            batch_id=f"mock-batch-{uuid.uuid4()}",
+            total=len(results),
+            accepted=accepted,
+            rejected=len(results) - accepted,
+            results=results,
+            mock=True,
+        )
