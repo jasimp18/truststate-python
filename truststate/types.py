@@ -22,6 +22,7 @@ class ComplianceResult:
         entity_id: The entity ID that was submitted (caller-supplied or auto-generated).
         fail_reason: Human-readable reason for failure — only set when passed=False.
         failed_step: Numeric step that failed (8=schema validation, 9=policy check).
+        feed_label: The feed label from the batch request — useful for multi-feed pipelines.
         mock: True when the result was synthesised locally in mock mode (no HTTP call made).
     """
 
@@ -31,6 +32,7 @@ class ComplianceResult:
     entity_id: str
     fail_reason: Optional[str]
     failed_step: Optional[int]
+    feed_label: Optional[str] = None
     mock: bool = False
 
 
@@ -97,6 +99,7 @@ class BatchResult:
         accepted: Number of items that passed compliance checks.
         rejected: Number of items that failed compliance checks.
         results: Per-item ComplianceResult list (same order as submitted items).
+        feed_label: The feed label for this batch (echoed from request).
         mock: True when running in mock mode (no HTTP calls made).
     """
 
@@ -105,4 +108,5 @@ class BatchResult:
     accepted: int
     rejected: int
     results: List[ComplianceResult]
+    feed_label: Optional[str] = None
     mock: bool = False

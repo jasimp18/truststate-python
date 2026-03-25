@@ -40,7 +40,7 @@ class TrustStateClient:
         self,
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
-        default_schema_version: str = "1.0",
+        default_schema_version: Optional[str] = None,
         default_actor_id: str = "",
         mock: bool = False,
         mock_pass_rate: float = 1.0,
@@ -112,6 +112,7 @@ class TrustStateClient:
         items: List[Dict[str, Any]],
         default_schema_version: Optional[str] = None,
         default_actor_id: Optional[str] = None,
+        feed_label: Optional[str] = None,
     ) -> BatchResult:
         """Submit multiple records for compliance checking in a single API call.
 
@@ -119,12 +120,15 @@ class TrustStateClient:
             items: List of item dicts. Each may contain:
                 - entity_type (required)
                 - data (required)
-                - action (optional, default "CREATE")
+                - action (optional, default "upsert")
                 - entity_id (optional, auto-generated if absent)
-                - schema_version (optional)
+                - schema_version (optional — server auto-resolves to active schema if omitted)
                 - actor_id (optional)
             default_schema_version: Fallback schema version for items that don't specify one.
+                If None, the server auto-resolves to the active schema for each entity type.
             default_actor_id: Fallback actor ID for items that don't specify one.
+            feed_label: Optional label identifying this feed/source (e.g. "core-banking-feed").
+                Echoed back on every item result — useful for multi-feed pipelines.
 
         Returns:
             BatchResult summarising acceptance/rejection counts and per-item results.
@@ -139,21 +143,29 @@ class TrustStateClient:
         normalised = []
         for item in items:
             eid = item.get("entity_id") or str(uuid.uuid4())
-            normalised.append(
-                {
-                    "entityType": item["entity_type"],
-                    "data": item["data"],
-                    "action": item.get("action", "CREATE"),
-                    "entityId": eid,
-                    "schemaVersion": item.get("schema_version") or schema_ver,
-                    "actorId": item.get("actor_id") or actor,
-                }
-            )
+            entry: Dict[str, Any] = {
+                "entityType": item["entity_type"],
+                "data": item["data"],
+                "action": item.get("action", "upsert"),
+                "entityId": eid,
+                "actorId": item.get("actor_id") or actor or "sdk-writer",
+            }
+            sv = item.get("schema_version") or schema_ver
+            if sv:
+                entry["schemaVersion"] = sv
+            normalised.append(entry)
 
         if self._mock:
-            return self._mock_batch_result(normalised)
+            return self._mock_batch_result(normalised, feed_label=feed_label)
 
-        payload = {"records": normalised}
+        payload: Dict[str, Any] = {"items": normalised}
+        if default_actor_id or self._default_actor_id:
+            payload["defaultActorId"] = default_actor_id or self._default_actor_id
+        if schema_ver:
+            payload["defaultSchemaVersion"] = schema_ver
+        if feed_label:
+            payload["feedLabel"] = feed_label
+
         response_json = await self._post("/v1/write/batch", payload)
         return self._parse_batch_response(response_json)
 
@@ -342,17 +354,17 @@ class TrustStateClient:
         if self._mock:
             return self._mock_single_result(eid)
 
-        payload = {
-            "records": [{
-                "entityType":    entity_type,
-                "data":          data,
-                "action":        action,
-                "entityId":      eid,
-                "schemaVersion": schema_ver,
-                "actorId":       actor,
-                "evidence":      [e.to_dict() for e in evidence],
-            }]
+        item: Dict[str, Any] = {
+            "entityType": entity_type,
+            "data":       data,
+            "action":     action,
+            "entityId":   eid,
+            "actorId":    actor or "sdk-writer",
+            "evidence":   [e.to_dict() for e in evidence],
         }
+        if schema_ver:
+            item["schemaVersion"] = schema_ver
+        payload = {"items": [item]}
         response_json = await self._post("/v1/write/batch", payload)
         return self._parse_batch_response(response_json).results[0]
 
@@ -428,14 +440,16 @@ class TrustStateClient:
         raw_results = data.get("results", [])
         results = []
         for r in raw_results:
+            accepted = r.get("status") == "accepted"
             results.append(
                 ComplianceResult(
-                    passed=r.get("passed", False),
+                    passed=accepted,
                     record_id=r.get("recordId"),
                     request_id=r.get("requestId", ""),
                     entity_id=r.get("entityId", ""),
                     fail_reason=r.get("failReason"),
                     failed_step=r.get("failedStep"),
+                    feed_label=r.get("feedLabel"),
                     mock=False,
                 )
             )
@@ -446,6 +460,7 @@ class TrustStateClient:
             accepted=data.get("accepted", sum(1 for r in results if r.passed)),
             rejected=data.get("rejected", sum(1 for r in results if not r.passed)),
             results=results,
+            feed_label=data.get("feedLabel"),
             mock=False,
         )
 
@@ -466,11 +481,13 @@ class TrustStateClient:
             mock=True,
         )
 
-    def _mock_batch_result(self, normalised_items: List[Dict[str, Any]]) -> BatchResult:
+    def _mock_batch_result(self, normalised_items: List[Dict[str, Any]], feed_label: Optional[str] = None) -> BatchResult:
         """Generate a synthetic BatchResult for mock mode."""
         results = [
             self._mock_single_result(item["entityId"]) for item in normalised_items
         ]
+        for r in results:
+            r.feed_label = feed_label
         accepted = sum(1 for r in results if r.passed)
         return BatchResult(
             batch_id=f"mock-batch-{uuid.uuid4()}",
@@ -478,5 +495,6 @@ class TrustStateClient:
             accepted=accepted,
             rejected=len(results) - accepted,
             results=results,
+            feed_label=feed_label,
             mock=True,
         )
