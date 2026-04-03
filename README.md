@@ -20,7 +20,10 @@ Requires Python 3.9+.
 import asyncio
 from truststate import TrustStateClient
 
-client = TrustStateClient(api_key="ts_your_api_key")
+client = TrustStateClient(
+    api_key="ts_your_api_key",
+    default_actor_id="my-service-001",  # must be registered in TrustState dashboard
+)
 
 async def main():
     result = await client.check(
@@ -54,7 +57,8 @@ result = await client.check_batch(
         {"entity_type": "SukukBond", "data": {"id": "BOND-002", ...}},
         {"entity_type": "SukukBond", "data": {"id": "BOND-003", ...}},
     ],
-    feed_label="core-banking-feed",   # echoed on every item result
+    feed_label="core-banking-feed",       # echoed on every item result
+    default_actor_id="my-service-001",    # must be registered in TrustState dashboard
 )
 
 print(f"Accepted: {result.accepted}/{result.total}")
@@ -142,10 +146,33 @@ result = await generate_response("What is TrustState?")
 | `api_key` | `str` | required | Your TrustState API key |
 | `base_url` | `str` | production URL | Override the API base URL |
 | `default_schema_version` | `str \| None` | `None` | Schema version (auto-resolved if omitted) |
-| `default_actor_id` | `str` | `""` | Actor ID for the audit trail |
+| `default_actor_id` | `str` | **required** | Registered Data Source ID — must match a source registered in the TrustState dashboard. All writes are rejected without a valid Source ID. |
 | `mock` | `bool` | `False` | Enable mock mode (no HTTP calls) |
 | `mock_pass_rate` | `float` | `1.0` | Pass probability in mock mode (0.0–1.0) |
 | `timeout` | `int` | `30` | HTTP timeout in seconds |
+
+
+## Data Sources (Required)
+
+Every write must come from a **registered Data Source**. Register sources in the TrustState dashboard under **Manage → Data Sources**, then use the Source ID as `actor_id`.
+
+```python
+# Register "my-service-001" in the dashboard first, then:
+client = TrustStateClient(
+    api_key="ts_your_api_key",
+    default_actor_id="my-service-001",  # applies to all check() / check_batch() calls
+)
+
+# Or pass per-call:
+result = await client.check(
+    entity_type="KYCRecord",
+    data=data,
+    actor_id="my-service-001",
+)
+```
+
+If `actor_id` is missing, the SDK raises `TrustStateError` before sending any request.
+If `actor_id` is not registered, the API returns `403 UNKNOWN_SOURCE`.
 
 ## API Reference
 
