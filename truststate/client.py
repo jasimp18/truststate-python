@@ -88,6 +88,11 @@ class TrustStateClient:
         """
         eid = entity_id or str(uuid.uuid4())
 
+        # Enforce actor_id presence per-item or default on the client
+        missing = [e for e in normalised if not e.get(actorId)]
+        if missing:
+            raise TrustStateError('actor_id is required for all writes. Provide actor_id per-item or set default_actor_id when constructing the client.')
+
         if self._mock:
             return self._mock_single_result(eid)
 
@@ -155,6 +160,11 @@ class TrustStateClient:
                 entry["schemaVersion"] = sv
             normalised.append(entry)
 
+        # Enforce actor_id presence per-item or default on the client
+        missing = [e for e in normalised if not e.get(actorId)]
+        if missing:
+            raise TrustStateError('actor_id is required for all writes. Provide actor_id per-item or set default_actor_id when constructing the client.')
+
         if self._mock:
             return self._mock_batch_result(normalised, feed_label=feed_label)
 
@@ -194,6 +204,11 @@ class TrustStateClient:
             EvidenceItem ready to pass to check() or check_batch().
         """
         subject = {"from": from_currency, "to": to_currency}
+        # Enforce actor_id presence per-item or default on the client
+        missing = [e for e in normalised if not e.get(actorId)]
+        if missing:
+            raise TrustStateError('actor_id is required for all writes. Provide actor_id per-item or set default_actor_id when constructing the client.')
+
         if self._mock:
             stub_rates = {"MYR_USD": 0.2119, "USD_MYR": 4.72, "EUR_USD": 1.085, "GBP_USD": 1.267}
             key = f"{from_currency}_{to_currency}"
@@ -234,6 +249,11 @@ class TrustStateClient:
             max_age_seconds: Max acceptable age (default 86400 = 24h).
         """
         subject = {"id": subject_id}
+        # Enforce actor_id presence per-item or default on the client
+        missing = [e for e in normalised if not e.get(actorId)]
+        if missing:
+            raise TrustStateError('actor_id is required for all writes. Provide actor_id per-item or set default_actor_id when constructing the client.')
+
         if self._mock:
             return EvidenceItem(
                 provider_id=provider_id,
@@ -270,6 +290,11 @@ class TrustStateClient:
             max_age_seconds: Max acceptable age (default 86400 = 24h).
         """
         subject = {"id": subject_id}
+        # Enforce actor_id presence per-item or default on the client
+        missing = [e for e in normalised if not e.get(actorId)]
+        if missing:
+            raise TrustStateError('actor_id is required for all writes. Provide actor_id per-item or set default_actor_id when constructing the client.')
+
         if self._mock:
             return EvidenceItem(
                 provider_id=provider_id,
@@ -300,6 +325,11 @@ class TrustStateClient:
     ) -> EvidenceItem:
         """Fetch a sanctions screening oracle evidence item."""
         subject = {"id": subject_id}
+        # Enforce actor_id presence per-item or default on the client
+        missing = [e for e in normalised if not e.get(actorId)]
+        if missing:
+            raise TrustStateError('actor_id is required for all writes. Provide actor_id per-item or set default_actor_id when constructing the client.')
+
         if self._mock:
             return EvidenceItem(
                 provider_id=provider_id,
@@ -350,6 +380,11 @@ class TrustStateClient:
         eid = entity_id or str(uuid.uuid4())
         schema_ver = schema_version or self._default_schema_version
         actor = actor_id or self._default_actor_id
+
+        # Enforce actor_id presence per-item or default on the client
+        missing = [e for e in normalised if not e.get(actorId)]
+        if missing:
+            raise TrustStateError('actor_id is required for all writes. Provide actor_id per-item or set default_actor_id when constructing the client.')
 
         if self._mock:
             return self._mock_single_result(eid)
